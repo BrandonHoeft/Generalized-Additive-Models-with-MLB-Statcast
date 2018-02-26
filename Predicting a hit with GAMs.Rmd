@@ -1,11 +1,11 @@
 ---
-title: "Predicting a hit with GAMs.md"
+title: "Predicting a hit with GAMs"
 author: "Brandon Hoeft"
 date: "February 25, 2018"
 output:
   github_document:
     toc: TRUE
-    toc_depth: 2
+    toc_depth: 3
 ---
 
 ```{r setup, include=FALSE}
@@ -90,9 +90,10 @@ We'll gloss over the exploratory data analysis for now, and get to modeling. Fir
 ``` {r}
 set.seed(54321)
 sample_data <- statcast17 %>%
+    # hit type data and complete cases. 
     filter(description %in% c("hit_into_play", "hit_into_play_no_out", "hit_into_play_score"),
            !events %in% c("sac_bunt", "catcher_interf")) %>%
-    sample_n(size = 50000, replace = FALSE) %>%
+    sample_n(size = 10000, replace = FALSE) %>%
     mutate(y_hit = factor(ifelse(events %in% c("single", "double", "triple", "home_run"),
                           "yes_hit",
                           "no_hit"), levels = c("no_hit", "yes_hit")))
@@ -111,15 +112,17 @@ Predictors we'll focus on for now to try and predict a hit are:
 
 * **release speed**: the speed of the pitch in MPH
 * **pitch type**: the type of pitch thrown.
+
 ``` {r echo = TRUE}
 pitch_type_summary <- sample_data %>%
     group_by(pitch_type) %>%
     summarize(total = n()) %>%
     mutate(proportion_of_total = round(total / sum(total), 2),
-           less_one_percent = ifelse(proportion_of_total <= .01, TRUE, FALSE)) %>%
+           less_two_percent = ifelse(proportion_of_total < .05, TRUE, FALSE)) %>%
     arrange(desc(total)) 
+pitch_type_summary %>% kable()
 
-rare_pitch <- pitch_type_summary[pitch_type_summary$less_one_percent == TRUE, ]$pitch_type
+rare_pitch <- pitch_type_summary[pitch_type_summary$less_two_percent == TRUE, ]$pitch_type
 ```
 
 * **p throws**: the throwing hand of the pitcher.
@@ -145,16 +148,47 @@ modeling_data <- sample_data %>%
     select(release_speed, pitch_type, p_throws, launch_angle, launch_speed, balls, strikes, y_hit) %>%
     mutate(pitch_type_clean = ifelse(pitch_type %in% rare_pitch, "Other", pitch_type),
            release_speed = as.numeric(release_speed)) %>%
-    select(-pitch_type)
-
+    filter(complete.cases(.)) %>% # only keep records with non-missing data. 
+    select(release_speed, pitch_type_clean, p_throws, launch_angle, launch_speed, balls, strikes, y_hit, -pitch_type)
+    
 glimpse(modeling_data)
 ```
 
-## Develop a Model
+## Fit a GAM Model using Cross-Validation
 
 We'll use the `caret` library to develop a gam, which relies on the `gam` library. 
 
+We'll use five-fold cross-validation. Additionally, for the `df` hyperparameter, "degrees freedom", we'll pass a grid of integer values. This model is using Hastie's package `GAM`. GAMs under this package are fit with smoothing splines. Hastie's book, [ISLR](http://www-bcf.usc.edu/~gareth/ISL/) explains these in detail. The effective degrees freedom or the $\lambda$ (lambda) parameter, penalizes the flexibility of each smoothing function for every x. 
+
+$\lambda$ measures the total change in the smoothing function (the 2nd derivative) over the range of x. Small values of $\lambda$ will allow for very flexible curves (low bias, high variance). Higher values of $\lambda$ create flatter, smooth curves that approach a line (high bias, low variance). The goal is to find the best form of the smoother function that balances bias-variance tradeoff. 
+
+$\lambda$ = 0: no penalty. the smoother function fits the Y ~ x relationship perfectly. 
+$\lambda$ > 0:  higher penalty. increasingly larger values make the function fit the Y ~ x relationship more smoothly.
+
 ``` {r}
+library(caret)
+library(gam)
 
+training_setup <- trainControl(method = "cv",
+                               number = 5, #10-fold CV
+                               savePredictions = TRUE,
+                               classProbs = TRUE) 
 
+degrees_freedom_grid = data.frame(df = seq(1, 20, by = 1))
+
+set.seed(2018)
+GAM_fit <- train(x = modeling_data[1:7],
+                 y = modeling_data$y_hit,
+                 method = 'gamSpline',
+                 trControl = training_setup,
+                 metric = "ROC",
+                 tuneGrid = degrees_freedom_grid)
+GAM_fit
+plot(GAM_fit, se = TRUE, col = "blue")
+```
+
+We can also plot the relationship identified by the best GAM final fit model.
+
+```{r}
+plot(GAM_fit$finalModel, se = TRUE, col = "blue", all.terms = TRUE)
 ```
