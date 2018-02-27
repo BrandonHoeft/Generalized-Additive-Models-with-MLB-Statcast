@@ -1,4 +1,4 @@
-Predicting a hit with GAMs.md
+Predicting a hit with GAMs
 ================
 Brandon Hoeft
 February 25, 2018
@@ -6,10 +6,11 @@ February 25, 2018
 -   [Overview](#overview)
 -   [Load Statcast Dataset](#load-statcast-dataset)
 -   [Basic Description of the Data](#basic-description-of-the-data)
+    -   [What events do we want?](#what-events-do-we-want)
 -   [Sample the data](#sample-the-data)
 -   [Predictors](#predictors)
 -   [Data Pre-processing](#data-pre-processing)
--   [Develop a Model](#develop-a-model)
+-   [Fit a GAM Model using Cross-Validation](#fit-a-gam-model-using-cross-validation)
 
 Overview
 --------
@@ -202,9 +203,10 @@ We'll gloss over the exploratory data analysis for now, and get to modeling. Fir
 ``` r
 set.seed(54321)
 sample_data <- statcast17 %>%
+    # hit type data and complete cases. 
     filter(description %in% c("hit_into_play", "hit_into_play_no_out", "hit_into_play_score"),
            !events %in% c("sac_bunt", "catcher_interf")) %>%
-    sample_n(size = 50000, replace = FALSE) %>%
+    sample_n(size = 10000, replace = FALSE) %>%
     mutate(y_hit = factor(ifelse(events %in% c("single", "double", "triple", "home_run"),
                           "yes_hit",
                           "no_hit"), levels = c("no_hit", "yes_hit")))
@@ -218,10 +220,10 @@ sample_data %>%
     ## # A tibble: 2 x 3
     ##     y_hit total average
     ##    <fctr> <int>   <dbl>
-    ## 1  no_hit 33317   0.666
-    ## 2 yes_hit 16683   0.334
+    ## 1  no_hit  6692   0.669
+    ## 2 yes_hit  3308   0.331
 
-We see that when the ball was hit into play for this sample of records, the batted ball landed for a hit approximately 33.4% of the time. This is the outcome we are going to target in our model.
+We see that when the ball was hit into play for this sample of records, the batted ball landed for a hit approximately 33.1% of the time. This is the outcome we are going to target in our model.
 
 Predictors
 ----------
@@ -236,10 +238,31 @@ pitch_type_summary <- sample_data %>%
     group_by(pitch_type) %>%
     summarize(total = n()) %>%
     mutate(proportion_of_total = round(total / sum(total), 2),
-           less_one_percent = ifelse(proportion_of_total <= .01, TRUE, FALSE)) %>%
+           less_two_percent = ifelse(proportion_of_total < .05, TRUE, FALSE)) %>%
     arrange(desc(total)) 
+pitch_type_summary %>% kable()
+```
 
-rare_pitch <- pitch_type_summary[pitch_type_summary$less_one_percent == TRUE, ]$pitch_type
+| pitch\_type |  total|  proportion\_of\_total| less\_two\_percent |
+|:------------|------:|----------------------:|:-------------------|
+| FF          |   3420|                   0.34| FALSE              |
+| FT          |   1600|                   0.16| FALSE              |
+| SL          |   1513|                   0.15| FALSE              |
+| CH          |   1111|                   0.11| FALSE              |
+| CU          |    695|                   0.07| FALSE              |
+| SI          |    624|                   0.06| FALSE              |
+| FC          |    523|                   0.05| FALSE              |
+| KC          |    215|                   0.02| TRUE               |
+| FS          |    178|                   0.02| TRUE               |
+| NA          |     60|                   0.01| TRUE               |
+| KN          |     53|                   0.01| TRUE               |
+| FO          |      4|                   0.00| TRUE               |
+| SC          |      2|                   0.00| TRUE               |
+| EP          |      1|                   0.00| TRUE               |
+| IN          |      1|                   0.00| TRUE               |
+
+``` r
+rare_pitch <- pitch_type_summary[pitch_type_summary$less_two_percent == TRUE, ]$pitch_type
 ```
 
 -   **p throws**: the throwing hand of the pitcher.
@@ -250,7 +273,7 @@ rare_pitch <- pitch_type_summary[pitch_type_summary$less_one_percent == TRUE, ]$
 
 <!-- -->
 
-    ## Observations: 50,000
+    ## Observations: 10,000
     ## Variables: 8
     ## $ release_speed <chr> "84.4", "88.8", "92.2", "84.3", "89.8", "92.6", ...
     ## $ pitch_type    <chr> "CU", "CH", "FT", "CU", "SL", "SI", "FF", "FT", ...
@@ -271,23 +294,101 @@ modeling_data <- sample_data %>%
     select(release_speed, pitch_type, p_throws, launch_angle, launch_speed, balls, strikes, y_hit) %>%
     mutate(pitch_type_clean = ifelse(pitch_type %in% rare_pitch, "Other", pitch_type),
            release_speed = as.numeric(release_speed)) %>%
-    select(-pitch_type)
-
+    filter(complete.cases(.)) %>% # only keep records with non-missing data. 
+    select(release_speed, pitch_type_clean, p_throws, launch_angle, launch_speed, balls, strikes, y_hit, -pitch_type)
+    
 glimpse(modeling_data)
 ```
 
-    ## Observations: 50,000
+    ## Observations: 9,934
     ## Variables: 8
     ## $ release_speed    <dbl> 84.4, 88.8, 92.2, 84.3, 89.8, 92.6, 90.9, 94....
+    ## $ pitch_type_clean <chr> "CU", "CH", "FT", "CU", "SL", "SI", "FF", "FT...
     ## $ p_throws         <chr> "R", "R", "R", "R", "L", "R", "L", "R", "R", ...
     ## $ launch_angle     <dbl> -17.223, 16.099, -40.229, 17.034, 33.471, 22....
     ## $ launch_speed     <dbl> 53.9, 98.7, 36.8, 107.3, 84.2, 110.2, 80.0, 8...
     ## $ balls            <int> 1, 0, 0, 0, 3, 3, 1, 2, 2, 0, 2, 1, 3, 0, 0, ...
     ## $ strikes          <int> 1, 0, 1, 1, 2, 1, 0, 0, 2, 1, 2, 2, 2, 1, 1, ...
     ## $ y_hit            <fctr> no_hit, no_hit, no_hit, yes_hit, no_hit, yes...
-    ## $ pitch_type_clean <chr> "CU", "CH", "FT", "CU", "SL", "SI", "FF", "FT...
 
-Develop a Model
----------------
+Fit a GAM Model using Cross-Validation
+--------------------------------------
 
 We'll use the `caret` library to develop a gam, which relies on the `gam` library.
+
+We'll use five-fold cross-validation. Additionally, for the `df` hyperparameter, "degrees freedom", we'll pass a grid of integer values. This model is using Hastie's package `GAM`. GAMs under this package are fit with smoothing splines. Hastie's book, [ISLR](http://www-bcf.usc.edu/~gareth/ISL/) explains these in detail. The effective degrees freedom or the *λ* (lambda) parameter, penalizes the flexibility of each smoothing function for every x.
+
+*λ* measures the total change in the smoothing function (the 2nd derivative) over the range of x. Small values of *λ* will allow for very flexible curves (low bias, high variance). Higher values of *λ* create flatter, smooth curves that approach a line (high bias, low variance). The goal is to find the best form of the smoother function that balances bias-variance tradeoff.
+
+*λ* = 0: no penalty. the smoother function fits the Y ~ x relationship perfectly. *λ* &gt; 0: higher penalty. increasingly larger values make the function fit the Y ~ x relationship more smoothly.
+
+``` r
+library(caret)
+library(gam)
+
+training_setup <- trainControl(method = "cv",
+                               number = 5, #10-fold CV
+                               savePredictions = TRUE,
+                               classProbs = TRUE) 
+
+degrees_freedom_grid = data.frame(df = seq(1, 20, by = 1))
+
+set.seed(2018)
+GAM_fit <- train(x = modeling_data[1:7],
+                 y = modeling_data$y_hit,
+                 method = 'gamSpline',
+                 trControl = training_setup,
+                 metric = "ROC",
+                 tuneGrid = degrees_freedom_grid)
+GAM_fit
+```
+
+    ## Generalized Additive Model using Splines 
+    ## 
+    ## 9934 samples
+    ##    7 predictor
+    ##    2 classes: 'no_hit', 'yes_hit' 
+    ## 
+    ## No pre-processing
+    ## Resampling: Cross-Validated (5 fold) 
+    ## Summary of sample sizes: 7948, 7947, 7947, 7947, 7947 
+    ## Resampling results across tuning parameters:
+    ## 
+    ##   df  Accuracy   Kappa    
+    ##    1  0.7077707  0.2335869
+    ##    2  0.7406882  0.3570811
+    ##    3  0.7481372  0.3912402
+    ##    4  0.7503527  0.4043510
+    ##    5  0.7550838  0.4205229
+    ##    6  0.7585065  0.4327442
+    ##    7  0.7623315  0.4437055
+    ##    8  0.7645461  0.4503964
+    ##    9  0.7649489  0.4514261
+    ##   10  0.7639422  0.4491903
+    ##   11  0.7650495  0.4512285
+    ##   12  0.7648483  0.4500004
+    ##   13  0.7646468  0.4483616
+    ##   14  0.7641434  0.4470345
+    ##   15  0.7637406  0.4458991
+    ##   16  0.7632373  0.4447499
+    ##   17  0.7633379  0.4451836
+    ##   18  0.7628343  0.4436894
+    ##   19  0.7641429  0.4462638
+    ##   20  0.7637402  0.4453441
+    ## 
+    ## Accuracy was used to select the optimal model using the largest value.
+    ## The final value used for the model was df = 11.
+
+``` r
+plot(GAM_fit, se = TRUE, col = "blue")
+```
+
+![](Predicting_a_hit_with_GAMs_files/figure-markdown_github/unnamed-chunk-7-1.png)
+
+We can also plot the relationship identified by the best GAM final fit model.
+
+``` r
+plot(GAM_fit$finalModel, se = TRUE, col = "blue", all.terms = TRUE)
+```
+
+![](Predicting_a_hit_with_GAMs_files/figure-markdown_github/unnamed-chunk-8-1.png)![](Predicting_a_hit_with_GAMs_files/figure-markdown_github/unnamed-chunk-8-2.png)![](Predicting_a_hit_with_GAMs_files/figure-markdown_github/unnamed-chunk-8-3.png)![](Predicting_a_hit_with_GAMs_files/figure-markdown_github/unnamed-chunk-8-4.png)![](Predicting_a_hit_with_GAMs_files/figure-markdown_github/unnamed-chunk-8-5.png)
